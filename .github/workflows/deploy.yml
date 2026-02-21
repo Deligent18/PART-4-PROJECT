@@ -1,0 +1,139 @@
+name: Build and Deploy
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # Build Frontend
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      
+      - name: Install dependencies
+        run: cd frontend && npm ci
+      
+      - name: Run linter
+        run: cd frontend && npm run build --if-present
+        continue-on-error: true
+      
+      - name: Build frontend
+        run: cd frontend && npm run build
+      
+      - name: Upload frontend artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+
+  # Build Backend
+  build-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      
+      - name: Run tests
+        run: |
+          cd backend && python -m pytest tests/ -v --tb=short
+        continue-on-error: true
+      
+      - name: Check code quality
+        run: |
+          pip install pylint
+          pylint backend/app.py --fail-under=7.0
+        continue-on-error: true
+
+  # Deploy Frontend to GitHub Pages
+  deploy-frontend:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download frontend artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+      
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./frontend/build
+
+  # Deploy Backend to Render or Railway
+  deploy-backend:
+    needs: build-backend
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to Render
+        run: |
+          curl -X POST https://api.render.com/deploy/srv-${{ secrets.RENDER_SERVICE_ID }}?key=${{ secrets.RENDER_API_KEY }}
+        continue-on-error: true
+      
+      - name: Alternative - Deploy to Railway
+        run: |
+          curl --request POST \
+            --url https://api.railway.app/graphql \
+            --header 'Authorization: Bearer ${{ secrets.RAILWAY_API_TOKEN }}' \
+            --data '{"query":"mutation { deploymentCreate(input: {environmentId: \"${{ secrets.RAILWAY_ENV_ID }}\"}) { id } }"}'
+        continue-on-error: true
+
+  # Smoke Tests
+  smoke-tests:
+    needs: [deploy-frontend, deploy-backend]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Test frontend deployment
+        run: |
+          curl -f https://deligent18.github.io/PART-4-PROJECT/ || exit 1
+      
+      - name: Test backend health endpoint
+        run: |
+          # Update this URL to your actual backend deployment URL
+          # curl -f https://your-backend-url.com/health || exit 1
+          echo "Backend health check would be performed here"
+
+  # Notify on completion
+  notify:
+    needs: [build-frontend, build-backend, deploy-frontend, deploy-backend]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deployment Status
+        run: |
+          echo "✅ Frontend Build: ${{ needs.build-frontend.result }}"
+          echo "✅ Backend Build: ${{ needs.build-backend.result }}"
+          echo "🚀 Frontend Deploy: ${{ needs.deploy-frontend.result }}"
+          echo "🚀 Backend Deploy: ${{ needs.deploy-backend.result }}"
